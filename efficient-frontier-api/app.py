@@ -13,10 +13,16 @@ def optimize(
     tickers_list = tickers.split(",")
     
     # 1. Fetch data
-    data = yf.download(tickers_list, start=start)["Adj Close"].dropna()
-    returns = data.pct_change().dropna()
+    data = yf.download(tickers_list, start=start)
+    if data.empty or "Adj Close" not in data.columns:
+        return {"error": "No price data available for given tickers", "tickers": tickers_list}
+    
+    prices = data["Adj Close"].dropna()
+    if prices.empty:
+        return {"error": "No adjusted close data found", "tickers": tickers_list}
 
     # 2. Compute expected returns & covariance
+    returns = prices.pct_change().dropna()
     mu = returns.mean() * 252
     Sigma = returns.cov() * 252
 
@@ -34,7 +40,6 @@ def optimize(
             "weights": dict(zip(tickers_list, map(float, weights)))
         })
     
-    # Sort portfolios by variance (so they line up for Plotly)
     results = sorted(results, key=lambda x: x["variance"])
-    
     return {"frontier": results}
+
