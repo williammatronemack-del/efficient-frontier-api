@@ -20,7 +20,7 @@ app.add_middleware(
 )
 
 # Load EODHD API key from Render environment variables
-EODHD_API_KEY = os.getenv(" 676bbd8276e561.79071637")
+EODHD_API_KEY = os.getenv("EODHD_API_KEY")
 
 @app.get("/optimize")
 def optimize(
