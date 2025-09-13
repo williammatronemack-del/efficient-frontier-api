@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import pandas as pd
 import requests
@@ -6,8 +7,20 @@ import os
 
 app = FastAPI(title="Efficient Frontier Optimizer")
 
-# Load your EODHD API key from Render environment variable
-EODHD_API_KEY = os.getenv("EODHD_API_KEY")
+# ✅ Enable CORS (restrict to your site for security)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://mackresearch.io", 
+        "http://localhost:8000"   # optional, for testing locally
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Load EODHD API key from Render environment variables
+EODHD_API_KEY = os.getenv(" 676bbd8276e561.79071637")
 
 @app.get("/optimize")
 def optimize(
@@ -38,6 +51,10 @@ def optimize(
         df = pd.DataFrame(data)
         df["date"] = pd.to_datetime(df["date"])
         df.set_index("date", inplace=True)
+
+        if "adjusted_close" not in df:
+            return {"error": f"No adjusted_close in EODHD response for {ticker}"}
+
         all_data[ticker] = df["adjusted_close"]
 
     if all_data.empty:
@@ -64,5 +81,4 @@ def optimize(
 
     results = sorted(results, key=lambda x: x["variance"])
     return {"frontier": results}
-
 
