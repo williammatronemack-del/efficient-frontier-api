@@ -1,5 +1,6 @@
-fastapi
-uvicorn
-yfinance
+flask
+flask-cors
 numpy
 pandas
+requests
+gunicorn
