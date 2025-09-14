@@ -16,8 +16,24 @@ CORS(app, origins=["https://mackresearch.io"])
 def ping():
     return jsonify({"ok": True, "message": "CORS is working 🚀"})
 
+# 🔎 Debug endpoint (safe)
+@app.route("/debug")
+def debug_env():
+    token = os.environ.get("EODHD_API_TOKEN")
+    if token:
+        return jsonify({
+            "EODHD_API_TOKEN_present": True,
+            "EODHD_API_TOKEN_preview": token[:6] + "..."  # only show first 6 chars
+        })
+    else:
+        return jsonify({
+            "EODHD_API_TOKEN_present": False
+        })
+
 # 📈 Helper: fetch daily closes from EODHD
 def fetch_prices(ticker, api_token, period="1y"):
+    if "." not in ticker:
+        ticker = ticker + ".US"
     url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_token}&fmt=json&period=d"
     res = requests.get(url)
     if res.status_code != 200:
@@ -43,10 +59,18 @@ def optimize():
         # Fetch historical prices for all tickers
         prices = {}
         for t in tickers:
-            prices[t] = fetch_prices(t, api_token)
+            try:
+                prices[t] = fetch_prices(t, api_token)
+            except Exception as e:
+                print(f"⚠️ Skipping {t}: {e}")
+
+        if not prices:
+            return jsonify({"error": "No valid tickers"}), 400
 
         # Align dates
         df = pd.concat(prices.values(), axis=1, keys=prices.keys()).dropna()
+        if df.empty:
+            return jsonify({"error": "No overlapping data across tickers"}), 400
 
         # Daily returns
         returns = df.pct_change().dropna()
@@ -55,26 +79,27 @@ def optimize():
         mean_returns = returns.mean()
         cov_matrix = returns.cov()
 
-        n_assets = len(tickers)
+        n_assets = len(mean_returns)
         n_portfolios = 5000
         results = []
-
         allocations = {}
 
         for i in range(n_portfolios):
-            # Random weights
             weights = np.random.random(n_assets)
             weights /= np.sum(weights)
 
-            # Portfolio return & volatility
             port_return = np.dot(weights, mean_returns)
             port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
 
-            results.append({"risk": float(port_vol), "return": float(port_return), "index": i})
-            allocations[i] = dict(zip(tickers, map(float, weights)))
+            results.append({
+                "risk": float(port_vol),
+                "return": float(port_return),
+                "index": i
+            })
+            allocations[i] = dict(zip(mean_returns.index, map(float, weights)))
 
         return jsonify({
-            "tickers": tickers,
+            "tickers": list(mean_returns.index),
             "portfolios": results,
             "allocations": allocations
         })
@@ -85,5 +110,6 @@ def optimize():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
 
