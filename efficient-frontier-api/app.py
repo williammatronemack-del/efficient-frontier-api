@@ -1,124 +1,89 @@
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import numpy as np
-import requests
+# app.py
 import os
-from typing import List
+import numpy as np
+import pandas as pd
+import requests
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-app = FastAPI()
+app = Flask(__name__)
 
-# Enable CORS for WP plugin
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 👉 restrict to ["https://mackresearch.io"] in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ✅ Enable CORS for your WP site
+CORS(app, origins=["https://mackresearch.io"])
 
-EODHD_API_KEY = os.getenv("EODHD_API_KEY", "YOUR_API_KEY")
+# 🔎 Simple test endpoint
+@app.route("/ping")
+def ping():
+    return jsonify({"ok": True, "message": "CORS is working 🚀"})
 
-def fetch_eodhd_data(ticker: str, start: str = None):
-    url = f"https://eodhd.com/api/eod/{ticker}"
-    params = {"api_token": EODHD_API_KEY, "fmt": "json"}
-    if start:
-        params["from"] = start
-
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        raise Exception(f"HTTP {resp.status_code} for {ticker}")
-
-    data = resp.json()
-    if not isinstance(data, list) or len(data) == 0:
-        raise Exception(f"No data for {ticker}")
-
+# 📈 Helper: fetch daily closes from EODHD
+def fetch_prices(ticker, api_token, period="1y"):
+    url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_token}&fmt=json&period=d"
+    res = requests.get(url)
+    if res.status_code != 200:
+        raise ValueError(f"Failed to fetch {ticker}: {res.text}")
+    data = res.json()
     df = pd.DataFrame(data)
-    if "adjusted_close" not in df.columns:
-        raise Exception(f"No adjusted_close in data for {ticker}")
-
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
-    return df[["adjusted_close"]].rename(columns={"adjusted_close": ticker})
+    return df["close"]
 
-@app.get("/optimize")
-def optimize(
-    tickers: List[str] = Query(...),
-    start: str = None,
-    n_points: int = 5000  # simulate 5000 portfolios by default
-):
-    frames = []
-    bad_tickers = []
-    for t in tickers:
-        try:
-            df = fetch_eodhd_data(t, start=start)
-            frames.append(df)
-        except Exception as e:
-            bad_tickers.append(f"{t}: {str(e)}")
+# 🧮 Optimize endpoint
+@app.route("/optimize")
+def optimize():
+    api_token = os.environ.get("EODHD_API_TOKEN")
+    if not api_token:
+        return jsonify({"error": "EODHD_API_TOKEN not set"}), 500
 
-    if not frames:
-        return {"error": "No data fetched", "skipped": bad_tickers}
+    tickers = request.args.getlist("tickers")
+    if len(tickers) < 2:
+        return jsonify({"error": "Please provide at least 2 tickers"}), 400
 
-    data = pd.concat(frames, axis=1).sort_index()
+    try:
+        # Fetch historical prices for all tickers
+        prices = {}
+        for t in tickers:
+            prices[t] = fetch_prices(t, api_token)
 
-    # IPO date trimming
-    ipo_dates = data.apply(lambda col: col.first_valid_index())
-    latest_ipo = ipo_dates.max()
-    if pd.isna(latest_ipo):
-        return {"error": "No valid data for provided tickers", "skipped": bad_tickers}
+        # Align dates
+        df = pd.concat(prices.values(), axis=1, keys=prices.keys()).dropna()
 
-    data = data.loc[latest_ipo:].dropna()
+        # Daily returns
+        returns = df.pct_change().dropna()
 
-    # Daily returns
-    daily_returns = data.pct_change().dropna()
-    if daily_returns.empty:
-        return {"error": "Not enough return data after IPO trimming", "skipped": bad_tickers}
+        # Mean & covariance
+        mean_returns = returns.mean()
+        cov_matrix = returns.cov()
 
-    # Geometric mean returns (annualized)
-    log_returns = np.log(1 + daily_returns)
-    geo_returns = np.exp(log_returns.mean() * 252) - 1
+        n_assets = len(tickers)
+        n_portfolios = 5000
+        results = []
 
-    # Covariance matrix (annualized)
-    cov_matrix = daily_returns.cov() * 252
+        allocations = {}
 
-    # Generate random portfolios
-    n_assets = len(tickers)
-    portfolios = []
-    for _ in range(n_points):
-        weights = np.random.random(n_assets)
-        weights /= np.sum(weights)
+        for i in range(n_portfolios):
+            # Random weights
+            weights = np.random.random(n_assets)
+            weights /= np.sum(weights)
 
-        port_return = np.dot(weights, geo_returns)
-        port_variance = np.dot(weights.T, np.dot(cov_matrix, weights))
+            # Portfolio return & volatility
+            port_return = np.dot(weights, mean_returns)
+            port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
 
-        portfolios.append({
-            "expected_return": float(port_return),
-            "variance": float(port_variance),
-            "weights": {tickers[i]: float(weights[i]) for i in range(n_assets)}
+            results.append({"risk": float(port_vol), "return": float(port_return), "index": i})
+            allocations[i] = dict(zip(tickers, map(float, weights)))
+
+        return jsonify({
+            "tickers": tickers,
+            "portfolios": results,
+            "allocations": allocations
         })
 
-    # Pareto-efficient filtering
-    df = pd.DataFrame(portfolios).sort_values("variance")
-    efficient = []
-    max_return = -np.inf
-    for _, row in df.iterrows():
-        if row["expected_return"] > max_return:
-            efficient.append(row)
-            max_return = row["expected_return"]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    results = [
-        {
-            "expected_return": round(r["expected_return"], 4),
-            "variance": round(r["variance"], 6),
-            "weights": {k: round(v, 3) for k, v in r["weights"].items()}
-        }
-        for r in efficient
-    ]
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
-    return {
-        "frontier": results,
-        "method": "geometric",
-        "note": f"All assets limited to IPO of newest asset (since {latest_ipo.date()}).",
-        "skipped": bad_tickers
-    }
 
